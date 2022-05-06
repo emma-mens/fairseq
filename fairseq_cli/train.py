@@ -36,6 +36,7 @@ from fairseq.model_parallel.megatron_trainer import MegatronTrainer
 from fairseq.trainer import Trainer
 from omegaconf import DictConfig, OmegaConf
 
+import bitsandbytes as bnb 
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -110,7 +111,9 @@ def main(cfg: FairseqConfig) -> None:
     def is_expert_param(p):
         return getattr(p, "expert", False) or getattr(p, "base_expert", False)
 
+    # logger.info("module parameters {}".format(str([(i,j) for (i,j) in enumerate(model.named_modules())])))
     logger.info(model)
+    bnb.optim.GlobalOptimManager.get_instance().model = model
     logger.info("task: {}".format(task.__class__.__name__))
     logger.info("model: {}".format(model.__class__.__name__))
     logger.info("criterion: {}".format(criterion.__class__.__name__))
