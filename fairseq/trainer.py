@@ -922,7 +922,7 @@ class Trainer(object):
             overflow = True
             logger.info(f"NOTE: gradient overflow detected, ignoring gradient, {str(e)}")
             grad_norm = torch.tensor(0.0).cuda()
-            self.zero_grad()
+            self.zero_grad(overflow)
         except RuntimeError as e:
             if "out of memory" in str(e):
                 self._log_oom(e)
@@ -1068,8 +1068,8 @@ class Trainer(object):
         logging_output = self._reduce_and_log_stats(logging_outputs, sample_size)
         return logging_output
 
-    def zero_grad(self):
-        self.optimizer.zero_grad()
+    def zero_grad(self, overflow=False):
+        self.optimizer.zero_grad(overflow)
 
     def lr_step_begin_epoch(self, epoch):
         """Adjust the learning rate at the beginning of the epoch."""

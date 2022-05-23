@@ -192,6 +192,7 @@ class Adam(torch.optim.Optimizer):
         self.grad_comp_threshold = grad_comp_threshold
         self.grad_comp_threshold_type = grad_comp_threshold_type
         self.min_exp_avg_sq = 1e-8
+        self.previous_mask = None
 
     @property
     def supports_memory_efficient_fp16(self):
@@ -200,6 +201,10 @@ class Adam(torch.optim.Optimizer):
     @property
     def supports_flat_params(self):
         return True
+
+    @property
+    def get_previous_mask(self):
+        return self.previous_mask
 
     def step(self, closure=None):
         """Performs a single optimization step.
@@ -212,17 +217,12 @@ class Adam(torch.optim.Optimizer):
         if closure is not None:
             loss = closure()
 
-        g = []
-        gq = []
-        sq = []
-        aq = []
-        snrq = []
+        new_mask = []
         for group in self.param_groups:
             for p in group["params"]:
                 if p.grad is None:
                     continue
                 grad = p.grad.data
-                #logger.info(str(check) + ' ' + str(grad.shape))
                 if grad.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.float()
                 if grad.is_sparse:
@@ -260,37 +260,25 @@ class Adam(torch.optim.Optimizer):
                     max_exp_avg_sq = state["max_exp_avg_sq"]
                 beta1, beta2 = group["betas"]
 
-                grad_mask = torch.ones_like(p_data_fp32).bool() # select all gradient values by default 
+                grad_mask = torch.ones_like(p_data_fp32).bool() # select all gradient values by default
                 new_beta1, new_beta2 = beta1, beta2
                 if self.grad_comp_threshold != -1.0:
-                    # threshold = self.grad_comp_threshold
                     to_mask = grad
                     if self.grad_comp_threshold_type == "snr" and state["step"] > 3000:
-                        snr = torch.div(exp_avg, exp_avg_sq + self.min_exp_avg_sq) # use square root for the second moment (use 1e-8)
-                        to_mask = snr  
+                        snr = torch.div(exp_avg, torch.sqrt(exp_avg_sq + self.min_exp_avg_sq)) # use square root for the second moment (use 1e-8)
+                        to_mask = snr
 
                     q = bnb.functional.estimate_quantiles(torch.abs(to_mask))
-                    #q_array.append(q.detach().cpu().numpy())
                     threshold = q[int(len(q)*self.grad_comp_threshold)]
                     grad_mask = torch.gt(torch.abs(to_mask), threshold)
-
-                    # grad_mask.mul_(grad)
-
-                #g.append(bnb.functional.estimate_quantiles(grad).detach().cpu().numpy())
-                #gq.append(bnb.functional.estimate_quantiles(torch.mul(grad, grad)).detach().cpu().numpy())
-                #aq.append(bnb.functional.estimate_quantiles(torch.abs(exp_avg)).detach().cpu().numpy())
-                #sq.append(bnb.functional.estimate_quantiles(torch.abs(exp_avg_sq)).detach().cpu().numpy())
-                #snrq.append(bnb.functional.estimate_quantiles(torch.abs(torch.div(exp_avg, exp_avg_sq + 1e-8))).detach().cpu().numpy()) 
-
+                    # save above mask
+                    new_mask.append(grad_mask)
 
                 state["step"] += 1
 
                 # Decay the first and second moment running average coefficient
-                # exp_avg.mul_(beta1).add_(grad_mask, alpha=1 - beta1)
-
-                exp_avg[grad_mask] = beta1*exp_avg[grad_mask] + (1-beta1)*grad[grad_mask]
-                exp_avg_sq[grad_mask] = beta2*exp_avg_sq[grad_mask] + (1-beta2)*grad[grad_mask]*grad[grad_mask]
-                # exp_avg_sq.mul_(beta2).addcmul_(grad_mask, grad_mask, value=1 - beta2)
+                exp_avg[grad_mask] = beta1 * exp_avg[grad_mask] + (1 - beta1) * grad[grad_mask]
+                exp_avg_sq[grad_mask] = beta2 * exp_avg_sq[grad_mask] + (1 - beta2) * grad[grad_mask]*grad[grad_mask]
                 if amsgrad:
                     # Maintains the maximum of all 2nd moment running avg. till now
                     torch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
@@ -312,15 +300,7 @@ class Adam(torch.optim.Optimizer):
 
                 if p.data.dtype in {torch.float16, torch.bfloat16}:
                     p.data.copy_(p_data_fp32)
-        #np.save('/mnt/D/emmanuel/experiments/g2_snrp5_betap99/g_' + str(state["step"]), np.array(g)) 
-        #np.save('/mnt/D/emmanuel/experiments/g2_snrp5_betap99/gq_' + str(state["step"]), np.array(gq)) 
-        #np.save('/mnt/D/emmanuel/experiments/g2_snrp5_betap99/aq_' + str(state["step"]), np.array(aq)) 
-        #np.save('/mnt/D/emmanuel/experiments/g2_snrp5_betap99/sq_' + str(state["step"]), np.array(sq)) 
-        #np.save('/mnt/D/emmanuel/experiments/g2_snrp5_betap99/snrq_' + str(state["step"]), np.array(snrq)) 
 
-        #np.save('/mnt/D/emmanuel/experiments/data/q_' + str(state["step"]), np.array(q_array))
-        #np.save('/mnt/D/emmanuel/experiments/data/gi_' + str(state["step"]), np.array(large_grad), allow_pickle=True)
-        #np.save('/mnt/D/emmanuel/experiments/data/ai_' + str(state["step"]), np.array(large_avg), allow_pickle=True)
-        #np.save('/mnt/D/emmanuel/experiments/data/si_' + str(state["step"]), np.array(large_sq), allow_pickle=True)
+        self.previous_mask = new_mask
 
         return loss

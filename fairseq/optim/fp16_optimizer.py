@@ -219,10 +219,19 @@ class _FP16OptimizerMixin(object):
 
         self._sync_fp32_params_to_fp16()
 
-    def zero_grad(self):
+    def zero_grad(self, overflow=False):
         """Clears the gradients of all optimized parameters."""
-        for p in self.fp16_params:
-            p.grad = None
+        previous_mask = self.fp32_optimizer.optimizer.previous_mask
+        use_gradient_compression = self.fp32_optimizer.optimizer.grad_comp_threshold != -1
+        use_momentum_correction = use_gradient_compression and (previous_mask is not None)
+
+        for (i, p) in enumerate(self.fp16_params):
+            if p.grad is not None:
+                if use_momentum_correction and not overflow:
+                    # allow grads to be reset when an overflow exception occurs during training
+                    p.grad[previous_mask[i]] = 0 # zero out gradients selected already otherwise accumulate
+                else:
+                    p.grad = None
         if self.has_flat_params:
             if torch.is_tensor(self.fp32_params):
                 self.fp32_params.grad.zero_()
@@ -232,9 +241,12 @@ class _FP16OptimizerMixin(object):
             else:
                 raise RuntimeError("self.fp32_params must be a tensor or dict")
         else:
-            for p32 in self.fp32_params:
+            for (j, p32) in enumerate(self.fp32_params):
                 if p32.grad is not None:
-                    p32.grad.zero_()
+                    if use_momentum_correction  and not overflow:
+                        p32.grad[previous_mask[j]] = 0
+                    else:
+                        p32.grad.zero_()
         self._needs_sync = False
 
         if self.scaler is not None:
