@@ -227,11 +227,11 @@ class _FP16OptimizerMixin(object):
 
         for (i, p) in enumerate(self.fp16_params):
             if p.grad is not None:
-                if use_momentum_correction and not overflow:
-                    # allow grads to be reset when an overflow exception occurs during training
-                    p.grad[previous_mask[i]] = 0 # zero out gradients selected already otherwise accumulate
-                else:
-                    p.grad = None
+                #if use_momentum_correction and not overflow:
+                #    # allow grads to be reset when an overflow exception occurs during training
+                #    p.grad[previous_mask[i]] = 0 # zero out gradients selected already otherwise accumulate
+                #else:
+                p.grad = None
         if self.has_flat_params:
             if torch.is_tensor(self.fp32_params):
                 self.fp32_params.grad.zero_()
@@ -243,10 +243,10 @@ class _FP16OptimizerMixin(object):
         else:
             for (j, p32) in enumerate(self.fp32_params):
                 if p32.grad is not None:
-                    if use_momentum_correction  and not overflow:
-                        p32.grad[previous_mask[j]] = 0
-                    else:
-                        p32.grad.zero_()
+                    #if use_momentum_correction  and not overflow:
+                    #    p32.grad[previous_mask[j]] = 0
+                    #else:
+                    p32.grad.zero_()
         self._needs_sync = False
 
         if self.scaler is not None:
@@ -457,6 +457,8 @@ class _MemoryEfficientFP16OptimizerMixin(object):
     def zero_grad(self):
         """Clears the gradients of all optimized parameters."""
         self.wrapped_optimizer.zero_grad()
+        print('We do some')
+        exit()
         if self.scaler is not None:
             self._multiply_factor = 1.0 / float(self.scaler.loss_scale)
         else:

@@ -218,11 +218,23 @@ class Adam(torch.optim.Optimizer):
             loss = closure()
 
         new_mask = []
+        model = bnb.optim.GlobalOptimManager.get_instance().model
+#         names = []
+#         for name, module in model.named_modules():
+#             if len(list(module.named_children())) == 0: # collect leaf nodes
+#                 p = list(module.parameters()) 
+#                 if len(p) > 0 and p[0].requires_grad: # filter by trainable params
+#                     names.append(name)
+#                     print(name, p[0].shape)
+#                     if 'bias' in module.state_dict(): # add bias name if applicable
+#                         names.append(name + '.bias')
+
+        best_grads = []
         for group in self.param_groups:
             for p in group["params"]:
                 if p.grad is None:
                     continue
-                grad = p.grad.data
+                grad = p.grad.data                
                 if grad.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.float()
                 if grad.is_sparse:
@@ -236,6 +248,9 @@ class Adam(torch.optim.Optimizer):
                     p_data_fp32 = p_data_fp32.float()
 
                 state = self.state[p]
+                if "accumulated_gradient" not in state: state["accumulated_gradient"] = torch.zeros_like(grad)
+                state["accumulated_gradient"] += grad
+                grad = state["accumulated_gradient"]
 
                 # State initialization
                 if len(state) == 0:
@@ -262,6 +277,7 @@ class Adam(torch.optim.Optimizer):
 
                 grad_mask = torch.ones_like(p_data_fp32).bool() # select all gradient values by default
                 new_beta1, new_beta2 = beta1, beta2
+                topk = 20
                 if self.grad_comp_threshold != -1.0:
                     to_mask = grad
                     if self.grad_comp_threshold_type == "snr" and state["step"] > 3000:
@@ -270,15 +286,50 @@ class Adam(torch.optim.Optimizer):
 
                     q = bnb.functional.estimate_quantiles(torch.abs(to_mask))
                     threshold = q[int(len(q)*self.grad_comp_threshold)]
+                    
+                    max_snr = torch.max(torch.abs(snr)) # torch.max(torch.abs(grad))#torch.max(q)
+                    # reduce axis 1 for topk snr
+                    g, grad_b_idx = torch.topk(torch.abs(torch.abs(snr) - max_snr), topk, largest=False) # gradients scoring the highest snr
+                    # g, grad_b_idx = torch.topk(torch.abs(torch.abs(grad) - max_snr), topk, largest=False)
+                    if len(grad_b_idx.shape) == 1: # ID topk
+                        final_idx = grad_b_idx.detach().cpu().numpy()
+                        grad_b = grad[final_idx].detach().cpu().numpy()
+                    else:                
+                        g2, idx2 = torch.topk(torch.abs(g), topk, largest=True, axis=0)
+                        idx2 = idx2.detach().cpu().numpy()
+                        db = np.unravel_index(idx2 * topk + np.arange(topk), grad_b_idx.shape)
+                        ur_idx = torch.from_numpy(db[0]).cuda(), torch.from_numpy(db[1]).cuda()
+                        #print(db)
+                        #print(grad_b_idx.shape)
+                        #print(torch.from_numpy(db).cuda())
+                        idx2y = grad_b_idx[ur_idx] #[torch.from_numpy(db).cuda()]
+                        # match row with column of topk nodes
+                        final_idx = np.array([idx2, idx2y.detach().cpu().numpy()]).transpose((1,2,0))
+                        # grad_b = grad_b[idx2]
+                        grad_b = grad[np.unravel_index(final_idx[:,:,0] * grad.shape[1] + final_idx[:,:,1], grad.shape)].detach().cpu().numpy()
+                    # reduce axis 0 for topk snr
+                    #grad_b2, grad_b_idx2 = torch.topk(torch.abs(torch.from_numpy(g)), topk, largest=True, axis=0)
+                    #topk2d_idx = [[(grad_b_idx[grad_b_idx2[i][j]][i], grad_b_idx2[i][j].numpy().item()) for j in range(topk)] for i in range(topk)]
+                    # save topk gradients and corresponding indices
+                    # best_grads.append((topk2d_idx.detach().cpu().numpy(), grad_b2.detach().cpu().numpy()))
+                    #best_grads.append((grad_b_idx.detach().cpu().numpy(), grad_b.detach().cpu().numpy()))
+                    best_grads.append((final_idx, grad_b))
+
                     grad_mask = torch.gt(torch.abs(to_mask), threshold)
                     # save above mask
                     new_mask.append(grad_mask)
+
+                #else:
+                #    max_grad = torch.max(grad)
+                #    grad_b, grad_b_idx = torch.topk(torch.abs(grad - max_grad), topk, largest=False) # largest gradients
+                #    best_grads.append((grad_b_idx.detach().cpu().numpy(), grad_b.detach().cpu().numpy()))
 
                 state["step"] += 1
 
                 # Decay the first and second moment running average coefficient
                 exp_avg[grad_mask] = beta1 * exp_avg[grad_mask] + (1 - beta1) * grad[grad_mask]
                 exp_avg_sq[grad_mask] = beta2 * exp_avg_sq[grad_mask] + (1 - beta2) * grad[grad_mask]*grad[grad_mask]
+                state["accumulated_gradient"][grad_mask] = 0
                 if amsgrad:
                     # Maintains the maximum of all 2nd moment running avg. till now
                     torch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
@@ -302,5 +353,7 @@ class Adam(torch.optim.Optimizer):
                     p.data.copy_(p_data_fp32)
 
         self.previous_mask = new_mask
+        save_folder = 'inspect'
+        # np.save('/mnt/D/emmanuel/experiments/' + save_folder + '/best_gs_' + str(state["step"]), np.array(best_grads, dtype=object), allow_pickle=True)
 
         return loss
