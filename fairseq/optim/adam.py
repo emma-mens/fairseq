@@ -230,6 +230,9 @@ class Adam(torch.optim.Optimizer):
 #                         names.append(name + '.bias')
 
         best_grads = []
+        p_cross = []
+        avg_max = []
+        avg_min = []
         for group in self.param_groups:
             for p in group["params"]:
                 if p.grad is None:
@@ -280,49 +283,47 @@ class Adam(torch.optim.Optimizer):
                 topk = 20
                 if self.grad_comp_threshold != -1.0:
                     to_mask = grad
-                    if self.grad_comp_threshold_type == "snr" and state["step"] > 3000:
+                    # hacky way to select fc layer for `this` implementation since only fc layers have shape [8192,1024] or [1024,8192]
+                    # is_fc_layer = 8192 in p_data_fp32.shape
+
+                    # hacky way to select attention projection layers for `this` implementation since they are the only layers with shape [1024, 1024]
+                    # is_attention_proj_layer = (len(p_data_fp32.shape) == 2) and (p_data_fp32.shape[0] == p_data_fp32.shape[1] == 1024)
+                    filtered_layer = True # is_fc_layer # is_attention_proj_layer 
+                    if self.grad_comp_threshold_type == "snr" and filtered_layer and state["step"] > 3000:
                         snr = torch.div(exp_avg, torch.sqrt(exp_avg_sq + self.min_exp_avg_sq)) # use square root for the second moment (use 1e-8)
                         to_mask = snr
 
                     q = bnb.functional.estimate_quantiles(torch.abs(to_mask))
                     threshold = q[int(len(q)*self.grad_comp_threshold)]
                     
-                    max_snr = torch.max(torch.abs(snr)) # torch.max(torch.abs(grad))#torch.max(q)
+                    # max_snr = torch.max(torch.abs(to_mask)) # torch.max(torch.abs(grad))#torch.max(q)
                     # reduce axis 1 for topk snr
-                    g, grad_b_idx = torch.topk(torch.abs(torch.abs(snr) - max_snr), topk, largest=False) # gradients scoring the highest snr
-                    # g, grad_b_idx = torch.topk(torch.abs(torch.abs(grad) - max_snr), topk, largest=False)
-                    if len(grad_b_idx.shape) == 1: # ID topk
-                        final_idx = grad_b_idx.detach().cpu().numpy()
-                        grad_b = grad[final_idx].detach().cpu().numpy()
-                    else:                
-                        g2, idx2 = torch.topk(torch.abs(g), topk, largest=True, axis=0)
-                        idx2 = idx2.detach().cpu().numpy()
-                        db = np.unravel_index(idx2 * topk + np.arange(topk), grad_b_idx.shape)
-                        ur_idx = torch.from_numpy(db[0]).cuda(), torch.from_numpy(db[1]).cuda()
-                        #print(db)
-                        #print(grad_b_idx.shape)
-                        #print(torch.from_numpy(db).cuda())
-                        idx2y = grad_b_idx[ur_idx] #[torch.from_numpy(db).cuda()]
-                        # match row with column of topk nodes
-                        final_idx = np.array([idx2, idx2y.detach().cpu().numpy()]).transpose((1,2,0))
-                        # grad_b = grad_b[idx2]
-                        grad_b = grad[np.unravel_index(final_idx[:,:,0] * grad.shape[1] + final_idx[:,:,1], grad.shape)].detach().cpu().numpy()
-                    # reduce axis 0 for topk snr
-                    #grad_b2, grad_b_idx2 = torch.topk(torch.abs(torch.from_numpy(g)), topk, largest=True, axis=0)
-                    #topk2d_idx = [[(grad_b_idx[grad_b_idx2[i][j]][i], grad_b_idx2[i][j].numpy().item()) for j in range(topk)] for i in range(topk)]
-                    # save topk gradients and corresponding indices
-                    # best_grads.append((topk2d_idx.detach().cpu().numpy(), grad_b2.detach().cpu().numpy()))
-                    #best_grads.append((grad_b_idx.detach().cpu().numpy(), grad_b.detach().cpu().numpy()))
-                    best_grads.append((final_idx, grad_b))
+                    # g, grad_b_idx = torch.topk(torch.abs(torch.abs(to_mask) - max_snr), topk, largest=False) # gradients scoring the highest snr
+                    # if len(grad_b_idx.shape) == 1: # ID topk
+                    #     final_idx = grad_b_idx.detach().cpu().numpy()
+                    #     grad_b = grad[final_idx].detach().cpu().numpy()
+                    # else:                
+                    #     g2, idx2 = torch.topk(torch.abs(g), topk, largest=False, axis=0)
+                    #     idx2 = idx2.detach().cpu().numpy()
+                    #     db = np.unravel_index(idx2 * topk + np.arange(topk), grad_b_idx.shape)
+                    #     ur_idx = torch.from_numpy(db[0]).cuda(), torch.from_numpy(db[1]).cuda()
 
-                    grad_mask = torch.gt(torch.abs(to_mask), threshold)
+                    #     idx2y = grad_b_idx[ur_idx]
+                    #     # match row with column of topk nodes
+                    #     final_idx = np.array([idx2, idx2y.detach().cpu().numpy()]).transpose((1,2,0))
+                    #     grad_b = grad[np.unravel_index(final_idx[:,:,0] * grad.shape[1] + final_idx[:,:,1], grad.shape)].detach().cpu().numpy().astype(object)
+                    # # save topk gradients and corresponding indices
+                    # best_grads.append((final_idx.reshape((-1,)), grad_b))
+
+                    # grad_mask = torch.gt(torch.abs(to_mask), threshold)
+                    ar = to_mask.reshape((-1, 4))
+                    m = torch.max(torch.abs(ar), axis=1)[0].reshape((-1,1))
+                    grad_mask = torch.gt(100*torch.abs(ar), m).reshape(to_mask.shape)
+                    # row_max, _ = torch.max(torch.abs(grad), axis=0)
+                    # grad_mask = torch.gt(100 * torch.abs(to_mask), row_max) # torch.gt(torch.abs(to_mask)/torch.log(row_max), row_max) # TODO: hyperparameter search
                     # save above mask
                     new_mask.append(grad_mask)
-
-                #else:
-                #    max_grad = torch.max(grad)
-                #    grad_b, grad_b_idx = torch.topk(torch.abs(grad - max_grad), topk, largest=False) # largest gradients
-                #    best_grads.append((grad_b_idx.detach().cpu().numpy(), grad_b.detach().cpu().numpy()))
+                    p_cross.append(np.mean(grad_mask.detach().cpu().numpy()))
 
                 state["step"] += 1
 
@@ -352,8 +353,9 @@ class Adam(torch.optim.Optimizer):
                 if p.data.dtype in {torch.float16, torch.bfloat16}:
                     p.data.copy_(p_data_fp32)
 
+        #print('percentage active in general', np.mean(p_cross))
         self.previous_mask = new_mask
         save_folder = 'inspect'
-        # np.save('/mnt/D/emmanuel/experiments/' + save_folder + '/best_gs_' + str(state["step"]), np.array(best_grads, dtype=object), allow_pickle=True)
+        #np.save('/mnt/D/emmanuel/experiments/' + save_folder + '/best_gs_' + str(state["step"]), np.array(best_grads, dtype=object), allow_pickle=True)
 
         return loss
